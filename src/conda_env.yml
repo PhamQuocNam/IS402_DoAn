@@ -1,0 +1,14 @@
+name: lightgbm-env
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.9
+  - pip
+  - pip:
+    - lightgbm
+    - scikit-learn
+    - pandas
+    - numpy
+    - mlflow
+    - azureml-mlflow
