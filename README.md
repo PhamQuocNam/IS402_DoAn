@@ -13,6 +13,8 @@ Dự án dự đoán doanh số bán lẻ sử dụng LightGBM với MLflow trac
 
 ### Sử dụng Conda (Khuyến nghị)
 
+> Ghi chú: môi trường hiện dùng Python 3.10 để tương thích tốt với Azure ML inference HTTP server khi test local.
+
 ```bash
 # Tạo môi trường conda từ file cấu hình
 conda env create -f src/conda_env.yml
@@ -24,23 +26,27 @@ conda activate lightgbm-env
 ### Hoặc cài đặt thủ công
 
 ```bash
-pip install lightgbm scikit-learn pandas numpy mlflow azureml-mlflow azure-ai-ml azure-identity
+pip install lightgbm scikit-learn pandas numpy mlflow azureml-mlflow azure-ai-ml azure-identity azureml-inference-server-http joblib
 ```
 
 ## 📁 Cấu trúc dự án
 
 ```
 IS402_DoAn/
-├── data/                    # Thư mục dữ liệu
+├── data/                   # Thư mục dữ liệu
 │   ├── sku_final.csv       # Thông tin SKU
 │   └── train_final.csv     # Dữ liệu training
-├── src/                     # Source code
+├── src/                    # Source code
 │   ├── train.py            # Script training chính
+│   ├── score.py            # Script inference/scoring cho Azure ML endpoint
 │   ├── connect.py          # Kết nối Azure ML
 │   ├── submit_job.py       # Gửi job lên Azure ML
 │   ├── init_instance.py    # Khởi tạo compute cluster
 │   ├── model_registry.py   # Đăng ký model
 │   └── conda_env.yml       # Cấu hình môi trường
+│   └── outputs/            # Model local để test inference
+│       └── lgb_sales_model.pkl
+├── sample-request.json     # Payload mẫu để test scoring script/endpoint
 ├── data.zip                # Dữ liệu nén
 └── README.md               # File này
 ```
@@ -66,6 +72,7 @@ python train.py --data_dir ../data --model_dir ./outputs
 ```
 
 **Tham số tùy chọn:**
+
 - `--data_dir`: Thư mục chứa dữ liệu (mặc định: `./raw-data`)
 - `--model_dir`: Thư mục lưu model (mặc định: `./outputs`)
 - `--n_estimators`: Số lượng cây (mặc định: 1500)
@@ -75,6 +82,7 @@ python train.py --data_dir ../data --model_dir ./outputs
 - `--random_state`: Seed ngẫu nhiên (mặc định: 42)
 
 **Ví dụ với tham số tùy chỉnh:**
+
 ```bash
 python train.py --data_dir ../data --model_dir ./outputs --n_estimators 2000 --learning_rate 0.03
 ```
@@ -113,6 +121,7 @@ python init_instance.py
 ```
 
 Script này sẽ:
+
 - Kiểm tra xem compute cluster đã tồn tại chưa
 - Tạo mới nếu chưa có với cấu hình: STANDARD_DS3_V2, 0-2 nodes
 
@@ -129,6 +138,7 @@ python submit_job.py
 ```
 
 Script này sẽ:
+
 - Tạo môi trường training từ `conda_env.yml`
 - Gửi job training lên Azure ML compute cluster
 - Stream log training về terminal
@@ -137,6 +147,7 @@ Script này sẽ:
 #### Bước 6: Theo dõi job
 
 Sau khi gửi job, bạn sẽ nhận được:
+
 - Tên job (ví dụ: `frozzy-lightgbm-training_1234567890`)
 - Link Azure ML Studio để theo dõi
 
@@ -147,6 +158,118 @@ python model_registry.py
 ```
 
 Khi được hỏi, nhập tên job từ bước 5.
+
+#### Bước 8: Chuẩn bị inference package
+
+Sau khi model được đăng ký trong Azure ML Model Registry, nhóm chuẩn bị các thành phần phục vụ triển khai inference:
+
+- `src/score.py`: scoring script chứa hai hàm `init()` và `run()`.
+- `src/conda_env.yml`: môi trường Python có LightGBM, pandas, numpy, scikit-learn, joblib và `azureml-inference-server-http`.
+- Registered model: `fozzy-lightgbm-sales-model:1`.
+
+`init()` load model từ biến môi trường `AZUREML_MODEL_DIR`; `run()` nhận JSON input, chuyển thành DataFrame, gọi `model.predict()` và trả về kết quả dự đoán.
+
+Khi test local, model cần được đặt tại:
+
+```text
+src/outputs/lgb_sales_model.pkl
+```
+
+> Mục tiêu của bước này là kiểm tra `score.py` có thể load model, nhận JSON input và trả kết quả dự đoán trước khi deploy lên Azure ML Online Endpoint.
+
+Kích hoạt môi trường
+
+```bash
+conda activate lightgbm-env
+```
+
+Nếu môi trường chưa được cập nhật sau khi sửa conda_env.yml, chạy:
+
+```bash
+conda env update -f src/conda_env.yml --prune
+conda activate lightgbm-env
+```
+
+Tạo file sample-request.json ở root repo:
+
+```json
+{
+	"geoCluster": 1,
+	"SKU": 12345,
+	"productCategoryId": 10,
+	"lagerUnitTypeId": 1,
+	"day_sin": 0.101168,
+	"day_cos": -0.994869,
+	"month_sin": 0.0,
+	"month_cos": -1.0,
+	"year": 2021,
+	"commodity_group": 5550259,
+	"trademark": 5
+}
+```
+
+`Cách 1`: Chạy trực tiếp score.py
+
+```bash
+cd src
+python src/score.py
+```
+
+Kết quả kỳ vọng:
+
+```bash
+{"predictions": [...], "n_records": 1}
+```
+
+Cách này kiểm tra nhanh các phần sau:
+
+- score.py chạy được.
+- Hàm **init()** load được model từ outputs/lgb_sales_model.pkl.
+- Hàm **run()** nhận JSON sample và gọi **model.predict()** thành công.
+
+`Cách 2`: Test bằng Azure ML inference HTTP server
+Chạy inference server ở terminal thứ nhất:
+
+```bash
+cd src
+azmlinfsrv --entry_script src/score.py --model_dir outputs
+
+# Nếu server chạy đúng, terminal sẽ hiển thị route:
+# Score: POST 127.0.0.1:5001/score
+```
+
+Mở terminal thứ hai, gửi request mẫu.
+
+- Với PowerShell:
+
+  ```bash
+  cd src
+  Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:5001/score" `
+  -ContentType "application/json" `
+  -Body (Get-Content .\sample-request.json -Raw)
+  ```
+
+- Hoặc dùng curl:
+  ```bash
+  cd src
+  curl -X POST http://127.0.0.1:5001/score \
+  -H "Content-Type: application/json" \
+  --data-binary @sample-request.json
+  ```
+
+Kết quả test local kỳ vọng sẽ trả về JSON chứa predictions:
+
+```bash
+{"predictions": [...], "n_records": 1}
+```
+
+- Ở Bước test, nhóm chưa tạo endpoint nên chưa gọi API prediction trên Azure. Việc cần kiểm tra trên Azure ML Studio là:
+- Model đã được đăng ký thành công trong Model Registry chưa.
+- `Azure ML Studio → Models → fozzy-lightgbm-sales-model → Version 1`
+
+> Nếu nhận được predictions, inference package đã sẵn sàng để triển khai sang Azure ML Online Endpoint ở Bước 5.
 
 ## 📊 Chi tiết Model
 
