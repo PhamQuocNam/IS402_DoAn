@@ -66,17 +66,39 @@ CAT_COLS = ["commodity_group", "lagerUnitTypeId"]
 def init():
     """
     Được Azure ML gọi một lần khi endpoint container khởi động.
-    Load model từ đường dẫn được Azure ML cung cấp qua biến môi trường
-    AZUREML_MODEL_DIR, hoặc fallback về ./outputs khi chạy local.
+    Load model từ AZUREML_MODEL_DIR khi chạy trên Azure,
+    hoặc fallback về ./outputs khi chạy local.
     """
     global model
 
     model_dir = os.getenv("AZUREML_MODEL_DIR", "./outputs")
-    model_path = os.path.join(model_dir, "lgb_sales_model.pkl")
+    logger.info(f"AZUREML_MODEL_DIR / local model_dir: {model_dir}")
 
-    logger.info(f"Loading model from: {model_path}")
-    model = joblib.load(model_path)
-    logger.info("Model loaded successfully.")
+    candidate_paths = [
+        os.path.join(model_dir, "lgb_sales_model.pkl"),
+        os.path.join(model_dir, "model", "lgb_sales_model.pkl"),
+        os.path.join(model_dir, "outputs", "lgb_sales_model.pkl"),
+    ]
+
+    # Tìm thêm mọi file .pkl bên trong model_dir
+    for root, _, files in os.walk(model_dir):
+        for filename in files:
+            if filename.endswith(".pkl"):
+                candidate_paths.append(os.path.join(root, filename))
+
+    logger.info(f"Candidate model paths: {candidate_paths}")
+
+    for path in candidate_paths:
+        if os.path.exists(path):
+            logger.info(f"Loading model from: {path}")
+            model = joblib.load(path)
+            logger.info("Model loaded successfully.")
+            return
+
+    raise FileNotFoundError(
+        f"Could not find lgb_sales_model.pkl under model_dir={model_dir}. "
+        f"Checked paths: {candidate_paths}"
+    )
 
 
 # ── run ──────────────────────────────────────────────────────────────────────

@@ -44,8 +44,6 @@ IS402_DoAn/
 │   ├── init_instance.py    # Khởi tạo compute cluster
 │   ├── model_registry.py   # Đăng ký model
 │   └── conda_env.yml       # Cấu hình môi trường
-│   └── outputs/            # Model local để test inference
-│       └── lgb_sales_model.pkl
 ├── sample-request.json     # Payload mẫu để test scoring script/endpoint
 ├── data.zip                # Dữ liệu nén
 └── README.md               # File này
@@ -169,70 +167,102 @@ Sau khi model được đăng ký trong Azure ML Model Registry, nhóm chuẩn b
 
 `init()` load model từ biến môi trường `AZUREML_MODEL_DIR`; `run()` nhận JSON input, chuyển thành DataFrame, gọi `model.predict()` và trả về kết quả dự đoán.
 
-Khi test local, model cần được đặt tại:
+Khi deploy lên Azure ML Online Endpoint, model artifact được mount vào biến môi trường `AZUREML_MODEL_DIR`. Trong lần deploy thử, Azure ML mount model theo cấu trúc:
 
 ```text
-src/outputs/lgb_sales_model.pkl
+AZUREML_MODEL_DIR/model/lgb_sales_model.pkl
 ```
+
+Vì vậy `src/score.py` được cấu hình để tìm model linh hoạt ở các vị trí:
+
+```text
+AZUREML_MODEL_DIR/lgb_sales_model.pkl
+AZUREML_MODEL_DIR/model/lgb_sales_model.pkl
+AZUREML_MODEL_DIR/outputs/lgb_sales_model.pkl
+```
+
+Khi test local, nhóm tạo thư mục `azure-test-model/model/` để giả lập đúng cấu trúc mount model trên Azure.
 
 > Mục tiêu của bước này là kiểm tra `score.py` có thể load model, nhận JSON input và trả kết quả dự đoán trước khi deploy lên Azure ML Online Endpoint.
 
-Kích hoạt môi trường
+Kích hoạt môi trường:
 
 ```bash
 conda activate lightgbm-env
 ```
 
-Nếu môi trường chưa được cập nhật sau khi sửa conda_env.yml, chạy:
+Nếu môi trường chưa được cập nhật sau khi sửa `conda_env.yml`, chạy:
 
 ```bash
 conda env update -f src/conda_env.yml --prune
 conda activate lightgbm-env
 ```
 
-Tạo file sample-request.json ở root repo:
+Tạo cấu trúc thư mục giả lập giống cách Azure ML mount model khi deploy:
 
-```json
-{
-	"geoCluster": 1,
-	"SKU": 12345,
-	"productCategoryId": 10,
-	"lagerUnitTypeId": 1,
-	"day_sin": 0.101168,
-	"day_cos": -0.994869,
-	"month_sin": 0.0,
-	"month_cos": -1.0,
-	"year": 2021,
-	"commodity_group": 5550259,
-	"trademark": 5
-}
+```powershell
+New-Item -ItemType Directory -Force .\azure-test-model\model
+Copy-Item .\src\outputs\lgb_sales_model.pkl .\azure-test-model\model\lgb_sales_model.pkl -Force
 ```
 
-`Cách 1`: Chạy trực tiếp score.py
+Kiểm tra model đã được copy:
 
-```bash
-cd src
-python src/score.py
+```powershell
+dir .\azure-test-model\model
 ```
 
 Kết quả kỳ vọng:
 
-```bash
+```text
+lgb_sales_model.pkl
+```
+
+> Lưu ý: `azure-test-model/`, `src/outputs/`, và các file `.pkl` chỉ dùng để test local, không push lên GitHub.
+
+Tạo file `sample-request.json` ở root repo:
+
+```json
+{
+  "geoCluster": 1,
+  "SKU": 12345,
+  "productCategoryId": 10,
+  "lagerUnitTypeId": 1,
+  "day_sin": 0.101168,
+  "day_cos": -0.994869,
+  "month_sin": 0.0,
+  "month_cos": -1.0,
+  "year": 2021,
+  "commodity_group": 5550259,
+  "trademark": 5
+}
+```
+
+`Cách 1`: Chạy trực tiếp `score.py`
+
+Đứng tại root repo `IS402_DoAn`, chạy:
+
+```powershell
+python .\src\score.py
+```
+
+Kết quả kỳ vọng:
+
+```json
 {"predictions": [...], "n_records": 1}
 ```
 
 Cách này kiểm tra nhanh các phần sau:
 
-- score.py chạy được.
-- Hàm **init()** load được model từ outputs/lgb_sales_model.pkl.
-- Hàm **run()** nhận JSON sample và gọi **model.predict()** thành công.
+- `score.py` chạy được.
+- Hàm `init()` load được model từ thư mục local hoặc từ cấu trúc giả lập Azure `azure-test-model/model/lgb_sales_model.pkl`.
+- Hàm `run()` nhận JSON sample và gọi `model.predict()` thành công.
 
 `Cách 2`: Test bằng Azure ML inference HTTP server
-Chạy inference server ở terminal thứ nhất:
 
-```bash
-cd src
-azmlinfsrv --entry_script src/score.py --model_dir outputs
+Chạy inference server ở terminal thứ nhất, vẫn đứng tại root repo `IS402_DoAn`:
+
+```powershell
+azmlinfsrv --entry_script .\src\score.py --model_dir .\azure-test-model
 
 # Nếu server chạy đúng, terminal sẽ hiển thị route:
 # Score: POST 127.0.0.1:5001/score
@@ -240,36 +270,47 @@ azmlinfsrv --entry_script src/score.py --model_dir outputs
 
 Mở terminal thứ hai, gửi request mẫu.
 
-- Với PowerShell:
+Với PowerShell:
 
-  ```bash
-  cd src
-  Invoke-RestMethod `
+```powershell
+Invoke-RestMethod `
   -Method Post `
   -Uri "http://127.0.0.1:5001/score" `
   -ContentType "application/json" `
   -Body (Get-Content .\sample-request.json -Raw)
-  ```
+```
 
-- Hoặc dùng curl:
-  ```bash
-  cd src
-  curl -X POST http://127.0.0.1:5001/score \
+Hoặc dùng curl:
+
+```bash
+curl -X POST http://127.0.0.1:5001/score \
   -H "Content-Type: application/json" \
   --data-binary @sample-request.json
-  ```
+```
 
 Kết quả test local kỳ vọng sẽ trả về JSON chứa predictions:
 
-```bash
-{"predictions": [...], "n_records": 1}
+```json
+{"predictions": [-0.32646408393872034], "n_records": 1}
 ```
 
-- Ở Bước test, nhóm chưa tạo endpoint nên chưa gọi API prediction trên Azure. Việc cần kiểm tra trên Azure ML Studio là:
+Trong terminal inference server, nếu thấy các dòng sau thì scoring script đã load model thành công:
+
+```text
+Invoking user's init function
+Users's init has completed successfully
+Worker with pid ... ready for serving traffic
+POST /score 200
+```
+
+Ở bước test local, nhóm chưa gọi API prediction trên Azure. Việc cần kiểm tra trên Azure ML Studio là:
+
 - Model đã được đăng ký thành công trong Model Registry chưa.
 - `Azure ML Studio → Models → fozzy-lightgbm-sales-model → Version 1`
 
-> Nếu nhận được predictions, inference package đã sẵn sàng để triển khai sang Azure ML Online Endpoint ở Bước 5.
+Sau khi local test nhận được `predictions`, inference package đã sẵn sàng để deploy lại trên Azure ML Online Endpoint ở Bước 5.
+
+Khi tạo deployment mới trên Azure, cần chọn lại `src/score.py` bản đã sửa ở mục **Code + environment**.
 
 ## 📊 Chi tiết Model
 

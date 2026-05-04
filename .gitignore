@@ -227,3 +227,8 @@ outputs/
 
 # sample data
 sample-request.json
+
+# Local Azure ML inference test artifacts
+azure-test-model/
+src/outputs/
+*.pkl
