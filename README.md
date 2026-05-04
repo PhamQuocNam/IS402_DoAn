@@ -419,6 +419,91 @@ print(f'Nodes: {compute.scale_settings.min_instances}-{compute.scale_settings.ma
 - Compute cluster tự scale về 0 khi không sử dụng để tiết kiệm chi phí
 - Model được lưu dưới dạng `.pkl` có thể load lại bằng `joblib.load()`
 
+## 🔄 Bước 6: CI/CD với Azure Pipelines
+
+### Tổng quan Pipeline
+
+Pipeline tự động chạy khi push code lên nhánh `main`, gồm 3 stages:
+
+```
+┌─────────────┐     ┌──────────────┐     ┌──────────────────────┐
+│   CI Stage   │────▶│  Train Stage  │────▶│      CD Stage         │
+│ Lint + Test  │     │ Azure ML Job │     │ Compare → Register   │
+│              │     │              │     │ → Deploy ACI + AKS   │
+└─────────────┘     └──────────────┘     └──────────────────────┘
+```
+
+- **CI**: Chạy `flake8` lint + `pytest` unit tests
+- **Train**: Gửi job huấn luyện LightGBM lên Azure ML compute cluster
+- **CD**: So sánh MAE/MSE model mới vs cũ → đăng ký → deploy lên ACI (staging) & AKS (production)
+
+### Cấu trúc file CI/CD
+
+```
+IS402_DoAn/
+├── azure-pipelines.yml           # Pipeline definition (3 stages)
+├── requirements-dev.txt          # pytest, flake8
+├── tests/
+│   ├── __init__.py
+│   └── test_train.py             # Unit tests cho train.py
+└── src/
+    ├── ci_submit_job.py          # Gửi job (dùng Service Principal)
+    ├── ci_compare_model.py       # So sánh MAE/MSE model mới vs cũ
+    ├── ci_register_model.py      # Đăng ký model với metrics tags
+    └── ci_deploy_model.py        # Deploy lên ACI (staging) + AKS (production)
+```
+
+### Thiết lập Azure DevOps
+
+#### Bước 1: Tạo Service Connection
+
+1. Azure DevOps → Project Settings → **Service connections**
+2. **New service connection** → **Azure Resource Manager** → **Service Principal (automatic)**
+3. Chọn Subscription: `35d715f0-0211-4894-9c18-aea6e5787b86`
+4. Chọn Resource Group: `is402_doan`
+5. Đặt tên: `AzureMLServiceConnection`
+6. Tick ✅ **Grant access permission to all pipelines**
+
+#### Bước 2: Tạo Variable Group (Tuỳ chọn)
+
+Pipelines → Library → **New Variable Group**, thêm các biến:
+
+| Variable | Value |
+|----------|-------|
+| `AZURE_SUBSCRIPTION_ID` | `35d715f0-0211-4894-9c18-aea6e5787b86` |
+| `AZURE_RESOURCE_GROUP` | `is402_doan` |
+| `AZURE_ML_WORKSPACE` | `machinelearningproject` |
+| `COMPUTE_NAME` | `cpu-cluster` |
+| `MODEL_NAME` | `fozzy-lightgbm-sales-model` |
+
+#### Bước 3: Tạo Pipeline
+
+1. Push code (bao gồm `azure-pipelines.yml`) lên Azure DevOps Repos
+2. Pipelines → **New Pipeline** → Azure Repos Git
+3. Chọn repo → **Existing Azure Pipelines YAML file** → chọn `azure-pipelines.yml`
+4. **Run** pipeline
+
+### Chạy Unit Test Local
+
+```bash
+# Cài dependencies test
+pip install -r requirements-dev.txt
+
+# Chạy tests
+pytest tests/ -v
+```
+
+### Flow hoạt động chi tiết
+
+1. Developer push code lên `main`
+2. **CI Stage**: Pipeline cài Python 3.10, chạy lint + pytest
+3. **Train Stage**: Gửi job lên Azure ML cluster, chờ hoàn thành, download metrics
+4. **CD Stage**:
+   - So sánh MAE & MSE model mới với model đang registered
+   - Nếu model mới tốt hơn → đăng ký model mới (kèm metrics tags)
+   - Deploy lên **ACI** endpoint (staging) để test
+   - Deploy lên **AKS** endpoint (production) để chạy thực tế
+
 ## 👥 Tác giả
 
 Dự án được phát triển cho môn học IS402 - Machine Learning

@@ -11,6 +11,7 @@ Usage (Azure ML):
 
 import os
 import gc
+import json
 import argparse
 import logging
 import numpy as np
@@ -213,8 +214,15 @@ def main():
         joblib.dump(model, model_path)
         logger.info(f"Model saved → {model_path}")
 
+        # ── Save metrics.json (cho CI/CD pipeline đọc) ─────────────────────
+        metrics_path = os.path.join(args.model_dir, "metrics.json")
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2)
+        logger.info(f"Metrics saved → {metrics_path}")
+
         # Log artifact để Azure ML có thể tải về / register
         mlflow.log_artifact(model_path, artifact_path="model")
+        mlflow.log_artifact(metrics_path, artifact_path="model")
 
     logger.info("Training completed.")
 

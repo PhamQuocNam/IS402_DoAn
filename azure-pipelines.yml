@@ -1,0 +1,285 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Azure DevOps CI/CD Pipeline — Fozzy Group Retail Sales Forecasting
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Pipeline gồm 3 stages:
+#   1. CI   — Lint + Unit Test
+#   2. Train — Gửi job huấn luyện lên Azure ML, chờ hoàn thành
+#   3. CD   — So sánh metrics → Đăng ký model → Deploy ACI (staging) + AKS (production)
+#
+# Trigger: push lên nhánh main (thay đổi src/, tests/, hoặc pipeline file)
+# ═══════════════════════════════════════════════════════════════════════════
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - 'src/**'
+      - 'tests/**'
+      - 'azure-pipelines.yml'
+
+# Có thể thêm schedule trigger (ví dụ: chạy hàng tuần)
+# schedules:
+#   - cron: "0 2 * * 1"
+#     displayName: "Weekly retraining"
+#     branches:
+#       include:
+#         - main
+#     always: true
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+# ── Variables ────────────────────────────────────────────────────────────────
+# Cách 1: Inline variables (đơn giản cho demo)
+# Cách 2: Dùng Variable Group → Pipelines > Library > New Variable Group
+variables:
+  pythonVersion: '3.10'
+  azureServiceConnection: 'AzureMLServiceConnection'   # Tên Service Connection đã tạo
+  subscriptionId: '35d715f0-0211-4894-9c18-aea6e5787b86'
+  resourceGroup: 'is402_doan'
+  workspaceName: 'machinelearningproject'
+  computeName: 'cpu-cluster'
+  modelName: 'fozzy-lightgbm-sales-model'
+  aciEndpointName: 'fozzy-sales-staging'
+  aksEndpointName: 'fozzy-sales-production'
+  aksComputeName: 'aks-cluster'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STAGE 1: CI — Lint & Unit Test
+# ═══════════════════════════════════════════════════════════════════════════
+stages:
+- stage: CI
+  displayName: 'CI — Lint & Unit Test'
+  jobs:
+  - job: LintAndTest
+    displayName: 'Lint + pytest'
+    steps:
+    # ── Python setup ─────────────────────────────────────────────────────
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Cài đặt Python $(pythonVersion)'
+
+    # ── Install dependencies ─────────────────────────────────────────────
+    - script: |
+        python -m pip install --upgrade pip
+        pip install -r requirements-dev.txt
+        pip install lightgbm scikit-learn pandas numpy mlflow joblib
+      displayName: 'Cài đặt dependencies'
+
+    # ── Lint (cảnh báo, không fail pipeline) ─────────────────────────────
+    - script: |
+        echo "Running flake8 lint..."
+        flake8 src/ --max-line-length=120 --ignore=E501,W503,E402 --count --statistics || true
+      displayName: 'Flake8 Lint (warning only)'
+
+    # ── Unit Tests ───────────────────────────────────────────────────────
+    - script: |
+        echo "Running pytest..."
+        pytest tests/ -v --tb=short --junitxml=test-results.xml
+      displayName: 'Chạy Unit Tests'
+
+    # ── Publish test results ─────────────────────────────────────────────
+    - task: PublishTestResults@2
+      inputs:
+        testResultsFormat: 'JUnit'
+        testResultsFiles: 'test-results.xml'
+        testRunTitle: 'Unit Tests'
+      condition: always()
+      displayName: 'Publish Test Results'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STAGE 2: TRAIN — Gửi job huấn luyện lên Azure ML
+# ═══════════════════════════════════════════════════════════════════════════
+- stage: Train
+  displayName: 'Train — Huấn luyện Model'
+  dependsOn: CI
+  condition: succeeded()
+  jobs:
+  - job: TrainModel
+    displayName: 'Submit Azure ML Training Job'
+    timeoutInMinutes: 120    # Timeout 2 giờ cho training
+    steps:
+    # ── Python setup ─────────────────────────────────────────────────────
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Cài đặt Python $(pythonVersion)'
+
+    # ── Install Azure ML SDK ─────────────────────────────────────────────
+    - script: |
+        python -m pip install --upgrade pip
+        pip install azure-ai-ml azure-identity mlflow azureml-mlflow
+      displayName: 'Cài đặt Azure ML SDK'
+
+    # ── Submit training job ──────────────────────────────────────────────
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Submitting training job..."
+          export AZURE_SUBSCRIPTION_ID=$(subscriptionId)
+          export AZURE_RESOURCE_GROUP=$(resourceGroup)
+          export AZURE_ML_WORKSPACE=$(workspaceName)
+          export COMPUTE_NAME=$(computeName)
+          export JOB_OUTPUT_FILE=$(Build.ArtifactStagingDirectory)/job_output.txt
+
+          python src/ci_submit_job.py
+      displayName: 'Submit & chờ Training Job'
+
+    # ── Publish artifacts cho stage tiếp theo ────────────────────────────
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: '$(Build.ArtifactStagingDirectory)/job_output.txt'
+        artifact: 'TrainOutput'
+        publishLocation: 'pipeline'
+      displayName: 'Publish Job Output'
+
+    - task: PublishPipelineArtifact@1
+      inputs:
+        targetPath: 'job_downloads'
+        artifact: 'JobDownloads'
+        publishLocation: 'pipeline'
+      displayName: 'Publish Job Downloads (metrics)'
+
+# ═══════════════════════════════════════════════════════════════════════════
+# STAGE 3: CD — So sánh, Đăng ký & Deploy
+# ═══════════════════════════════════════════════════════════════════════════
+- stage: CD
+  displayName: 'CD — Deploy Model'
+  dependsOn: Train
+  condition: succeeded()
+  jobs:
+  # ── Job 1: So sánh metrics ─────────────────────────────────────────────
+  - job: CompareModel
+    displayName: 'So sánh Model Metrics'
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Cài đặt Python'
+
+    - script: |
+        pip install azure-ai-ml azure-identity
+      displayName: 'Cài đặt Azure ML SDK'
+
+    # Download artifacts từ Train stage
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        artifact: 'TrainOutput'
+        path: '$(Pipeline.Workspace)/TrainOutput'
+      displayName: 'Download Job Output'
+
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        artifact: 'JobDownloads'
+        path: '$(Pipeline.Workspace)/JobDownloads'
+      displayName: 'Download Job Metrics'
+
+    # So sánh metrics
+    - task: AzureCLI@2
+      name: compare
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          export AZURE_SUBSCRIPTION_ID=$(subscriptionId)
+          export AZURE_RESOURCE_GROUP=$(resourceGroup)
+          export AZURE_ML_WORKSPACE=$(workspaceName)
+          export MODEL_NAME=$(modelName)
+          export JOB_OUTPUT_FILE=$(Pipeline.Workspace)/TrainOutput/job_output.txt
+          export JOB_DOWNLOAD_PATH=$(Pipeline.Workspace)/JobDownloads
+
+          python src/ci_compare_model.py
+      displayName: 'So sánh MAE & MSE'
+
+  # ── Job 2: Đăng ký & Deploy (chỉ chạy nếu model tốt hơn) ─────────────
+  - job: RegisterAndDeploy
+    displayName: 'Đăng ký & Deploy Model'
+    dependsOn: CompareModel
+    condition: eq(dependencies.CompareModel.outputs['compare.SHOULD_DEPLOY'], 'true')
+    steps:
+    - task: UsePythonVersion@0
+      inputs:
+        versionSpec: '$(pythonVersion)'
+      displayName: 'Cài đặt Python'
+
+    - script: |
+        pip install azure-ai-ml azure-identity
+      displayName: 'Cài đặt Azure ML SDK'
+
+    # Download artifacts
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        artifact: 'TrainOutput'
+        path: '$(Pipeline.Workspace)/TrainOutput'
+      displayName: 'Download Job Output'
+
+    - task: DownloadPipelineArtifact@2
+      inputs:
+        artifact: 'JobDownloads'
+        path: '$(Pipeline.Workspace)/JobDownloads'
+      displayName: 'Download Job Metrics'
+
+    # ── Đăng ký model ────────────────────────────────────────────────────
+    - task: AzureCLI@2
+      name: register
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          export AZURE_SUBSCRIPTION_ID=$(subscriptionId)
+          export AZURE_RESOURCE_GROUP=$(resourceGroup)
+          export AZURE_ML_WORKSPACE=$(workspaceName)
+          export MODEL_NAME=$(modelName)
+          export JOB_OUTPUT_FILE=$(Pipeline.Workspace)/TrainOutput/job_output.txt
+          export MODEL_VERSION_FILE=model_version.txt
+
+          # Copy compare_result.json nếu có
+          cp $(Pipeline.Workspace)/JobDownloads/compare_result.json compare_result.json 2>/dev/null || true
+
+          python src/ci_register_model.py
+      displayName: 'Đăng ký Model vào Registry'
+
+    # ── Deploy lên ACI (Staging) ─────────────────────────────────────────
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          export AZURE_SUBSCRIPTION_ID=$(subscriptionId)
+          export AZURE_RESOURCE_GROUP=$(resourceGroup)
+          export AZURE_ML_WORKSPACE=$(workspaceName)
+          export MODEL_NAME=$(modelName)
+          export ACI_ENDPOINT_NAME=$(aciEndpointName)
+          export MODEL_VERSION_FILE=model_version.txt
+
+          python src/ci_deploy_model.py --target aci
+      displayName: 'Deploy lên ACI (Staging/Test)'
+
+    # ── Deploy lên AKS (Production) ──────────────────────────────────────
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: '$(azureServiceConnection)'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          export AZURE_SUBSCRIPTION_ID=$(subscriptionId)
+          export AZURE_RESOURCE_GROUP=$(resourceGroup)
+          export AZURE_ML_WORKSPACE=$(workspaceName)
+          export MODEL_NAME=$(modelName)
+          export AKS_ENDPOINT_NAME=$(aksEndpointName)
+          export AKS_COMPUTE_NAME=$(aksComputeName)
+          export MODEL_VERSION_FILE=model_version.txt
+
+          python src/ci_deploy_model.py --target aks
+      displayName: 'Deploy lên AKS (Production)'
+      continueOnError: true    # Không fail pipeline nếu AKS chưa có

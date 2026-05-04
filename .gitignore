@@ -232,3 +232,10 @@ sample-request.json
 azure-test-model/
 src/outputs/
 *.pkl
+
+# CI/CD temp files
+job_output.txt
+job_downloads/
+compare_result.json
+model_version.txt
+test-results.xml
