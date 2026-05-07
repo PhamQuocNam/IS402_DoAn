@@ -221,8 +221,8 @@ def main():
         logger.info(f"Metrics saved → {metrics_path}")
 
         # Log artifact để Azure ML có thể tải về / register
-        mlflow.log_artifact(model_path, artifact_path="model")
-        mlflow.log_artifact(metrics_path, artifact_path="model")
+        # mlflow.log_artifact(model_path, artifact_path="model")
+        # mlflow.log_artifact(metrics_path, artifact_path="model")
 
     logger.info("Training completed.")
 
