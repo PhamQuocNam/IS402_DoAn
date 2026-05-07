@@ -50,7 +50,7 @@ def main():
 
     # ── Đường dẫn tới model artifact trong job outputs ────────────────────────
     model_path = (
-        f"azureml://jobs/{job_name}/outputs/artifacts/paths/model/lgb_sales_model.pkl"
+        f"azureml://jobs/{job_name}/outputs/artifacts/paths/outputs/lgb_sales_model.pkl"
     )
 
     # ── Tags cho model ───────────────────────────────────────────────────────
