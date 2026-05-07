@@ -1,0 +1,16 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  azagent:
+    build: .
+    image: azdevops-agent:latest
+    restart: always
+    environment:
+      AZP_URL: "https://dev.azure.com/"
+      AZP_TOKEN: "" # Đọc từ file .env
+      AZP_POOL: "SelfHostedDocker"
+      AZP_AGENT_NAME: "docker-agent-01"
+    # Nếu cần mount Docker socket (để build Docker trong pipeline):
+    # volumes:
+    #   - /var/run/docker.sock:/var/run/docker.sock

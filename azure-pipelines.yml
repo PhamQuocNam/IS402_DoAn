@@ -30,7 +30,7 @@ trigger:
 #     always: true
 
 pool:
-  vmImage: 'ubuntu-latest'
+  name: 'SelfHostedDocker'
 
 # ── Variables ────────────────────────────────────────────────────────────────
 # Cách 1: Inline variables (đơn giản cho demo)
